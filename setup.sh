@@ -7,17 +7,22 @@ function echo_block() {
     echo "----------------------------"
 }
 
-function check_installed_pip() {
-   ${PYTHON} -m pip > /dev/null
-   if [ $? -ne 0 ]; then
-        echo_block "Installing Pip for ${PYTHON}"
-        curl https://bootstrap.pypa.io/get-pip.py -s -o get-pip.py
-        ${PYTHON} get-pip.py
-        rm get-pip.py
-   fi
+function check_installed_uv() {
+    if ! command -v uv &> /dev/null; then
+        echo_block "Installing uv"
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.cargo/bin:$PATH"
+        # Reload the shell to make uv available
+        source ~/.bashrc 2>/dev/null || source ~/.zshrc 2>/dev/null || true
+        if ! command -v uv &> /dev/null; then
+            echo "Failed to install uv. Please install it manually from https://github.com/astral-sh/uv"
+            exit 1
+        fi
+    fi
+    echo "uv is available"
 }
 
-# Check which python version is installed
+# Check which python version is installed and ensure uv is available
 function check_installed_python() {
     if [ -n "${VIRTUAL_ENV}" ]; then
         echo "Please deactivate your virtual environment before running setup.sh."
@@ -25,35 +30,38 @@ function check_installed_python() {
         exit 2
     fi
 
+    check_installed_uv
+
+    # uv will handle Python version detection and installation
+    # Check if we can find a suitable Python version
     for v in 13 12 11
     do
         PYTHON="python3.${v}"
-        which $PYTHON
-        if [ $? -eq 0 ]; then
-            echo "using ${PYTHON}"
-            check_installed_pip
+        if command -v $PYTHON &> /dev/null; then
+            echo "Found ${PYTHON}"
+            PYTHON_VERSION="3.${v}"
             return
         fi
     done
 
-    echo "No usable python found. Please make sure to have python3.11 or newer installed."
-    exit 1
+    echo "No usable python found. uv will install Python automatically."
+    PYTHON_VERSION="3.11"  # Default to Python 3.11
 }
 
 function updateenv() {
     echo_block "Updating your virtual environment"
-    if [ ! -f .venv/bin/activate ]; then
+    if [ ! -f .venv/pyvenv.cfg ]; then
         echo "Something went wrong, no virtual environment found."
         exit 1
     fi
-    source .venv/bin/activate
+    
     SYS_ARCH=$(uname -m)
-    echo "pip install in-progress. Please wait..."
-    ${PYTHON} -m pip install --upgrade pip wheel setuptools
-    REQUIREMENTS_HYPEROPT=""
-    REQUIREMENTS_PLOT=""
-    REQUIREMENTS_FREQAI=""
-    REQUIREMENTS_FREQAI_RL=""
+    echo "uv install in-progress. Please wait..."
+    
+    # Activate the virtual environment for uv
+    source .venv/bin/activate
+    
+    REQUIREMENTS_FILES=()
     REQUIREMENTS=requirements.txt
 
     read -p "Do you want to install dependencies for development (Performs a full install with all dependencies) [y/N]? "
@@ -61,43 +69,52 @@ function updateenv() {
     if [[ $REPLY =~ ^[Yy]$ ]]
     then
         REQUIREMENTS=requirements-dev.txt
+        REQUIREMENTS_FILES+=("$REQUIREMENTS")
     else
+        REQUIREMENTS_FILES+=("$REQUIREMENTS")
         # requirements-dev.txt includes all the below requirements already, so further questions are pointless.
         read -p "Do you want to install plotting dependencies (plotly) [y/N]? "
         if [[ $REPLY =~ ^[Yy]$ ]]
         then
-            REQUIREMENTS_PLOT="-r requirements-plot.txt"
+            REQUIREMENTS_FILES+=("requirements-plot.txt")
         fi
         if [ "${SYS_ARCH}" == "armv7l" ] || [ "${SYS_ARCH}" == "armv6l" ]; then
             echo "Detected Raspberry, installing cython, skipping hyperopt installation."
-            ${PYTHON} -m pip install --upgrade cython
+            uv pip install cython
         else
             # Is not Raspberry
             read -p "Do you want to install hyperopt dependencies [y/N]? "
             if [[ $REPLY =~ ^[Yy]$ ]]
             then
-                REQUIREMENTS_HYPEROPT="-r requirements-hyperopt.txt"
+                REQUIREMENTS_FILES+=("requirements-hyperopt.txt")
             fi
         fi
 
         read -p "Do you want to install dependencies for freqai [y/N]? "
         if [[ $REPLY =~ ^[Yy]$ ]]
         then
-            REQUIREMENTS_FREQAI="-r requirements-freqai.txt --use-pep517"
             read -p "Do you also want dependencies for freqai-rl or PyTorch (~700mb additional space required) [y/N]? "
             if [[ $REPLY =~ ^[Yy]$ ]]
             then
-                REQUIREMENTS_FREQAI="-r requirements-freqai-rl.txt"
+                REQUIREMENTS_FILES+=("requirements-freqai-rl.txt")
+            else
+                REQUIREMENTS_FILES+=("requirements-freqai.txt")
             fi
         fi
     fi
 
-    ${PYTHON} -m pip install --upgrade -r ${REQUIREMENTS} ${REQUIREMENTS_HYPEROPT} ${REQUIREMENTS_PLOT} ${REQUIREMENTS_FREQAI} ${REQUIREMENTS_FREQAI_RL}
-    if [ $? -ne 0 ]; then
-        echo "Failed installing dependencies"
-        exit 1
-    fi
-    ${PYTHON} -m pip install -e .
+    # Install requirements using uv
+    for req_file in "${REQUIREMENTS_FILES[@]}"; do
+        echo "Installing requirements from $req_file"
+        uv pip install -r "$req_file"
+        if [ $? -ne 0 ]; then
+            echo "Failed installing dependencies from $req_file"
+            exit 1
+        fi
+    done
+    
+    # Install freqtrade in editable mode
+    uv pip install -e .
     if [ $? -ne 0 ]; then
         echo "Failed installing Freqtrade"
         exit 1
@@ -106,10 +123,10 @@ function updateenv() {
     echo "Installing freqUI"
     freqtrade install-ui
 
-    echo "pip install completed"
+    echo "uv install completed"
     echo
     if [[ $dev =~ ^[Yy]$ ]]; then
-        ${PYTHON} -m pre_commit install
+        pre-commit install
         if [ $? -ne 0 ]; then
             echo "Failed installing pre-commit"
             exit 1
@@ -126,21 +143,22 @@ function install_macos() {
     fi
 
     brew install gettext libomp
-
-    #Gets number after decimal in python version
-    version=$(egrep -o 3.\[0-9\]+ <<< $PYTHON | sed 's/3.//g')
+    
+    # uv will handle Python installation, no need to manually check version
 }
 
 # Install bot Debian_ubuntu
 function install_debian() {
     sudo apt-get update
-    sudo apt-get install -y gcc build-essential autoconf libtool pkg-config make wget git curl $(echo lib${PYTHON}-dev ${PYTHON}-venv)
+    sudo apt-get install -y gcc build-essential autoconf libtool pkg-config make wget git curl
+    # uv will handle Python installation and virtual environments
 }
 
 # Install bot RedHat_CentOS
 function install_redhat() {
     sudo yum update
-    sudo yum install -y gcc gcc-c++ make autoconf libtool pkg-config wget git $(echo ${PYTHON}-devel | sed 's/\.//g')
+    sudo yum install -y gcc gcc-c++ make autoconf libtool pkg-config wget git
+    # uv will handle Python installation and development headers
 }
 
 # Upgrade the bot
@@ -179,9 +197,10 @@ function recreate_environments() {
     fi
 
     echo
-    ${PYTHON} -m venv .venv
+    echo "Creating virtual environment with uv..."
+    uv venv .venv --python "${PYTHON_VERSION}"
     if [ $? -ne 0 ]; then
-        echo "Could not create virtual environment. Leaving now"
+        echo "Could not create virtual environment with uv. Leaving now"
         exit 1
     fi
 
@@ -248,11 +267,18 @@ function install() {
     echo "You can now use the bot by executing 'source .venv/bin/activate; freqtrade <subcommand>'."
     echo "You can see the list of available bot sub-commands by executing 'source .venv/bin/activate; freqtrade --help'."
     echo "You verify that freqtrade is installed successfully by running 'source .venv/bin/activate; freqtrade --version'."
+    echo "Note: This setup now uses uv for faster Python package management."
 }
 
 function plot() {
     echo_block "Installing dependencies for Plotting scripts"
-    ${PYTHON} -m pip install plotly --upgrade
+    if [ -f .venv/bin/activate ]; then
+        source .venv/bin/activate
+        uv pip install plotly
+    else
+        echo "No virtual environment found. Please run setup first."
+        exit 1
+    fi
 }
 
 function help() {
@@ -264,7 +290,7 @@ function help() {
     echo "	-p,--plot       Install dependencies for Plotting scripts."
 }
 
-# Verify if 3.11+ is installed
+# Verify if 3.11+ is installed and setup uv
 check_installed_python
 
 case $* in
