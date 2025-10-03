@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 #encoding=utf8
 
+function check_installed_uv() {
+    # Add common uv installation paths to PATH
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/root/.local/bin:$PATH"
+    
+    if ! command -v uv &> /dev/null; then
+        echo_block "Installing uv"
+        # Don't install if we're running as root and uv might already be installed for the user
+        if [ "$EUID" -eq 0 ]; then
+            echo "Warning: Running as root. uv should be installed for the user account."
+            echo "Please run this script without sudo, or install uv manually:"
+            echo "curl -LsSf https://astral.sh/uv/install.sh | sh"
+            echo "Then add ~/.local/bin to your PATH"
+            exit 1
+        fi
+        
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        
+        if ! command -v uv &> /dev/null; then
+            echo "Failed to install uv. Please install it manually from https://github.com/astral-sh/uv"
+            echo "Run: curl -LsSf https://astral.sh/uv/install.sh | sh"
+            echo "Then add ~/.local/bin to your PATH"
+            exit 1
+        fi
+    fi
+    echo "uv is available at: $(command -v uv)"
+}
+
 function echo_block() {
     echo "----------------------------"
     echo $1
